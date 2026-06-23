@@ -1,0 +1,2 @@
+{"verdict": "accept", "from_worker": "planner", "to_worker": "executor", "contract_id": "planner_to_executor.v1"}
+{"verdict": "accept", "from_worker": "executor", "to_worker": "auditor", "contract_id": "executor_to_auditor.v1"}
