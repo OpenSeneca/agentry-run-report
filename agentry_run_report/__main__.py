@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 
+from . import __version__
 from .report import (
     ReportError,
     load_run,
@@ -17,10 +18,16 @@ from .report import (
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(
-            "Usage: python3 -m agentry_run_report <run-dir> [--json] [--strict]",
+            f"agentry-run-report {__version__}\n"
+            "Usage: python3 -m agentry_run_report <run-dir> [--json] [--strict]\n"
+            "       python3 -m agentry_run_report --version",
             file=sys.stderr,
         )
         return 1 if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help") else 0
+
+    if "--version" in sys.argv[1:]:
+        print(f"agentry-run-report {__version__}")
+        return 0
 
     args = sys.argv[1:]
     run_dir = args[0]

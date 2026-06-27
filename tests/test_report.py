@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 from agentry_run_report import (  # noqa: E402
     ReportError,
+    __version__,
     aggregate_steps,
     compute_costs,
     compute_durations,
@@ -221,6 +223,113 @@ class OutputTests(unittest.TestCase):
             self.assertIn("calc", md)
             self.assertIn("Cost by model", md)
             self.assertIn("gpt-4o-mini", md)
+
+
+class CLITests(unittest.TestCase):
+    """Exercise the ``agentry-run-report.py`` CLI as a subprocess.
+
+    These tests pin the ``--version`` flag (new in v0.1.1) against the
+    pyproject.toml ``[project] version`` so a future bump cannot leave
+    the two out of sync again (the v0.1.5 defect pattern from
+    agentry-stack-smoke).
+    """
+
+    def _run_cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "agentry-run-report.py"), *args],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_version_flag_prints_version_and_exits_zero(self):
+        """``--version`` exits 0 and prints the package semver from pyproject.toml."""
+        import re
+        toml = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'^version\s*=\s*"(\d+\.\d+\.\d+)"', toml, re.MULTILINE)
+        self.assertTrue(m, "pyproject.toml is missing [project] version")
+        pyproject_version = m.group(1)
+
+        proc = self._run_cli("--version")
+        self.assertEqual(
+            proc.returncode, 0,
+            f"--version should exit 0, got {proc.returncode}: {proc.stderr}",
+        )
+        out = proc.stdout
+        self.assertIn("agentry-run-report", out)
+        self.assertIn(pyproject_version, out)
+        # Regression pin: the printed semver must match pyproject.toml.
+        # v0.1.5 (agentry-stack-smoke) shipped the flag but the string
+        # was stuck at the prior version.  Pin both so it can't drift.
+        self.assertEqual(__version__, pyproject_version)
+
+    def test_version_flag_via_module(self):
+        """``python3 -m agentry_run_report --version`` also exits 0."""
+        proc = subprocess.run(
+            [sys.executable, "-m", "agentry_run_report", "--version"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(__version__, proc.stdout)
+
+    def test_summary_flag_emits_machine_readable_json(self):
+        """``--summary`` prints a single JSON object with the documented schema."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-summary"
+            _write_run(d, GOOD_EVENTS, GOOD_TRAJ)
+            proc = self._run_cli("--run-dir", str(d), "--summary")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            # Required schema fields (new in v0.1.1)
+            for key in (
+                "tool", "version", "run_id", "status", "chain_ok",
+                "chain_events", "chain_broken_at_seq", "n_steps",
+                "total_tokens", "cost_usd", "trajectory_count",
+                "handoffs_validated", "handoffs_failed", "fiscal_status",
+                "duration_seconds",
+            ):
+                self.assertIn(key, payload, f"missing key: {key}")
+            self.assertEqual(payload["tool"], "agentry-run-report")
+            self.assertEqual(payload["version"], __version__)
+            self.assertEqual(payload["run_id"], "run-summary")
+            self.assertTrue(payload["chain_ok"])
+            self.assertEqual(payload["chain_events"], len(GOOD_EVENTS))
+            self.assertEqual(payload["n_steps"], 2)
+            self.assertEqual(payload["total_tokens"], 26)
+            self.assertAlmostEqual(payload["cost_usd"], 0.0002, places=6)
+            self.assertEqual(payload["trajectory_count"], 1)
+            self.assertEqual(payload["duration_seconds"], 3.0)
+
+    def test_summary_flag_short_circuits_report_body(self):
+        """``--summary`` must NOT emit the markdown body to stdout."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-summary-no-body"
+            _write_run(d, GOOD_EVENTS, GOOD_TRAJ)
+            proc = self._run_cli("--run-dir", str(d), "--summary")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            # A single line of JSON, no markdown headers.
+            self.assertNotIn("# Agentry run report", proc.stdout)
+            self.assertNotIn("Tool usage", proc.stdout)
+            self.assertEqual(proc.stdout.count("\n"), 1)
+
+    def test_summary_flag_reports_chain_break(self):
+        """``--summary`` surfaces chain_ok=False when events.jsonl is tampered."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-bad-chain"
+            d.mkdir(parents=True, exist_ok=True)
+            chained = _chain(GOOD_EVENTS)
+            chained[1]["output"] = "tampered"
+            with (d / "events.jsonl").open("w", encoding="utf-8") as fh:
+                for ev in chained:
+                    fh.write(json.dumps(ev) + "\n")
+            proc = self._run_cli("--run-dir", str(d), "--summary")
+            payload = json.loads(proc.stdout)
+            self.assertFalse(payload["chain_ok"])
+            self.assertEqual(payload["chain_broken_at_seq"], 2)
 
 
 if __name__ == "__main__":
