@@ -4,6 +4,14 @@ All notable changes to **agentry-run-report** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-06-27
+
+### Changed
+- **README.md synced to v0.1.2**: status table, test count (12→17), CLI
+  examples updated from old `--run-dir` flag to positional `run_dir`
+  (matches the argparse rewrite in v0.1.1). Adds `--summary` and
+  `--version` to the CLI examples. Documents `bash examples/smoke.sh`.
+
 ## [0.1.1] — 2026-06-27
 
 ### Added

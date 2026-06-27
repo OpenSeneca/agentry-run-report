@@ -10,7 +10,7 @@ the audit layer.
 
 | Agentry layer | Status | Tests | License | Python | Deps |
 |---|---|---|---|---|---|
-| orchestration (unified report / run-summary) | v0.1.0 | 12/12 in <0.05s | MIT (OpenSeneca) | 3.8+ | **stdlib only** |
+| orchestration (unified report / run-summary) | v0.1.2 | 17/17 in <0.5s | MIT (OpenSeneca) | 3.8+ | **stdlib only** |
 
 ## What it composes into
 
@@ -60,19 +60,27 @@ cd agentry-run-report
 ## CLI
 
 ```bash
-# Markdown to stdout
-python3 agentry-run-report.py --run-dir runs/run-001 --format markdown
+# Markdown to stdout (default)
+agentry-run-report runs/run-001
 
 # JSON to stdout
-python3 agentry-run-report.py --run-dir runs/run-001 --format json
+agentry-run-report runs/run-001 --format json
 
 # Both, to files
-python3 agentry-run-report.py --run-dir runs/run-001 --format both \
+agentry-run-report runs/run-001 --format both \
         --md-out report.md --json-out report.json
 
 # Strict CI mode: exit 2 on chain break, exit 3 on incomplete run
-python3 agentry-run-report.py --run-dir runs/run-001 --format json --strict
+agentry-run-report runs/run-001 --format json --strict
+
+# Machine-readable one-line summary (v0.1.1+)
+agentry-run-report runs/run-001 --summary
+
+# Version
+agentry-run-report --version
 ```
+
+Can also be invoked as `python3 -m agentry_run_report <run-dir>` or `python3 agentry-run-report.py <run-dir>`.
 
 Exit codes:
 - `0` — report built, run completed, chain intact
@@ -122,15 +130,13 @@ cd agentry-run-report
 python3 tests/test_report.py
 ```
 
-12 tests, ~10ms, stdlib only.
+17 tests, ~0.5s, stdlib only. 18/18 smoke checks via `bash examples/smoke.sh`.
 
 ## Example
 
 ```bash
 python3 examples/build_sample_run.py          # writes examples/sample_run/
-python3 agentry-run-report.py \
-        --run-dir examples/sample_run \
-        --format markdown
+agentry-run-report examples/sample_run --format markdown
 ```
 
 Sample output (excerpt):

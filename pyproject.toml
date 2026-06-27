@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentry-run-report"
-version = "0.1.1"
+version = "0.1.2"
 description = "Unified report generator for an Agentry run directory. Composes recorder, handoff, fiscal, and trajectory signals into one Markdown + JSON deliverable."
 readme = "README.md"
 requires-python = ">=3.8"
