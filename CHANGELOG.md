@@ -12,6 +12,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   (matches the argparse rewrite in v0.1.1). Adds `--summary` and
   `--version` to the CLI examples. Documents `bash examples/smoke.sh`.
 
+## [0.1.3] — 2026-06-28
+
+### Added
+- **`--lint` CLI flag** and `lint_run()` API. Lints a run directory for
+  structural and semantic integrity, emitting a JSON findings list with
+  codes **E001–E005** (errors) and **W001–W007** (warnings). Exits 0 if
+  no errors, 2 if errors found. Does NOT raise on lint failures — only
+  reports findings. Covers: missing/malformed events.jsonl, SHA-256 chain
+  breaks, sequence gaps, missing start/complete events, non-monotonic
+  timestamps, trajectory cross-reference mismatches, cost-without-model,
+  handoff-ledger missing verdict, fiscal-log missing decision.
+- **`LintFinding` and `LintReport` dataclasses** exported from the package.
+  `LintReport.to_dict()` provides the JSON schema for CI consumers.
+- **16 new unit tests** for lint coverage (17 → 33 total): one per error /
+  warning code, plus schema and CLI subprocess tests.
+- **2 new smoke sections** (8 → 10 sections, 18 → 22 checks): `--lint` on
+  clean run (exit 0) and `--lint` on chain-broken run (exit 2 + E003).
+
+### Changed
+- **Bump version 0.1.1 → 0.1.3** in `__init__.py` and `pyproject.toml`.
+  (v0.1.2 was a README-only release on GitHub; code version jumps 0.1.1 →
+  0.1.3 to align.)
+
+### Tests
+- 17 → 33 unit tests (~0.7s).
+- 8 → 10 smoke sections, 18 → 22 checks.
+
 ## [0.1.1] — 2026-06-27
 
 ### Added

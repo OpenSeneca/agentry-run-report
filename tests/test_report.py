@@ -18,11 +18,13 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
 from agentry_run_report import (  # noqa: E402
+    LintReport,
     ReportError,
     __version__,
     aggregate_steps,
     compute_costs,
     compute_durations,
+    lint_run,
     load_run,
     render_markdown,
     to_json,
@@ -225,6 +227,17 @@ class OutputTests(unittest.TestCase):
             self.assertIn("gpt-4o-mini", md)
 
 
+def _run_cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """Run the agentry-run-report CLI as a subprocess."""
+    return subprocess.run(
+        [sys.executable, str(ROOT / "agentry-run-report.py"), *args],
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 class CLITests(unittest.TestCase):
     """Exercise the ``agentry-run-report.py`` CLI as a subprocess.
 
@@ -234,15 +247,6 @@ class CLITests(unittest.TestCase):
     agentry-stack-smoke).
     """
 
-    def _run_cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(ROOT / "agentry-run-report.py"), *args],
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
     def test_version_flag_prints_version_and_exits_zero(self):
         """``--version`` exits 0 and prints the package semver from pyproject.toml."""
         import re
@@ -251,7 +255,7 @@ class CLITests(unittest.TestCase):
         self.assertTrue(m, "pyproject.toml is missing [project] version")
         pyproject_version = m.group(1)
 
-        proc = self._run_cli("--version")
+        proc = _run_cli("--version")
         self.assertEqual(
             proc.returncode, 0,
             f"--version should exit 0, got {proc.returncode}: {proc.stderr}",
@@ -281,7 +285,7 @@ class CLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             d = Path(td) / "run-summary"
             _write_run(d, GOOD_EVENTS, GOOD_TRAJ)
-            proc = self._run_cli("--run-dir", str(d), "--summary")
+            proc = _run_cli("--run-dir", str(d), "--summary")
             self.assertEqual(proc.returncode, 0, proc.stderr)
             payload = json.loads(proc.stdout)
             # Required schema fields (new in v0.1.1)
@@ -309,7 +313,7 @@ class CLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             d = Path(td) / "run-summary-no-body"
             _write_run(d, GOOD_EVENTS, GOOD_TRAJ)
-            proc = self._run_cli("--run-dir", str(d), "--summary")
+            proc = _run_cli("--run-dir", str(d), "--summary")
             self.assertEqual(proc.returncode, 0, proc.stderr)
             # A single line of JSON, no markdown headers.
             self.assertNotIn("# Agentry run report", proc.stdout)
@@ -326,10 +330,235 @@ class CLITests(unittest.TestCase):
             with (d / "events.jsonl").open("w", encoding="utf-8") as fh:
                 for ev in chained:
                     fh.write(json.dumps(ev) + "\n")
-            proc = self._run_cli("--run-dir", str(d), "--summary")
+            proc = _run_cli("--run-dir", str(d), "--summary")
             payload = json.loads(proc.stdout)
             self.assertFalse(payload["chain_ok"])
             self.assertEqual(payload["chain_broken_at_seq"], 2)
+
+
+# ---------- lint tests ----------
+
+
+class LintTests(unittest.TestCase):
+    """Tests for the ``--lint`` / ``lint_run()`` feature (v0.1.3)."""
+
+    def test_lint_clean_run_no_findings(self):
+        """A well-formed run directory should lint with zero findings."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-clean"
+            _write_run(d, GOOD_EVENTS, GOOD_TRAJ,
+                       handoff_ledger=[{"verdict": "accept"}],
+                       fiscal_log=[{"decision": "allow"}])
+            result = lint_run(d)
+            self.assertTrue(result.ok)
+            self.assertEqual(result.errors, 0)
+            self.assertEqual(result.warnings, 0)
+            self.assertEqual(len(result.findings), 0)
+            self.assertEqual(result.run_id, "run-clean")
+
+    def test_lint_missing_events_jsonl_e001(self):
+        """E001: events.jsonl not found."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-no-events"
+            d.mkdir()
+            result = lint_run(d)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.errors, 1)
+            self.assertEqual(result.findings[0].code, "E001")
+
+    def test_lint_invalid_json_e002(self):
+        """E002: events.jsonl has invalid JSON."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-bad-json"
+            d.mkdir()
+            (d / "events.jsonl").write_text(
+                '{"valid": true}\n{invalid json}\n', encoding="utf-8")
+            result = lint_run(d)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.errors, 1)
+            self.assertEqual(result.findings[0].code, "E002")
+
+    def test_lint_chain_break_e003(self):
+        """E003: SHA-256 chain broken."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-chain-broken"
+            d.mkdir()
+            chained = _chain(GOOD_EVENTS)
+            chained[1]["output"] = "tampered"
+            with (d / "events.jsonl").open("w") as fh:
+                for ev in chained:
+                    fh.write(json.dumps(ev) + "\n")
+            result = lint_run(d)
+            self.assertFalse(result.ok)
+            codes = [f.code for f in result.findings]
+            self.assertIn("E003", codes)
+
+    def test_lint_seq_gap_e004(self):
+        """E004: seq numbers not contiguous."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-seq-gap"
+            d.mkdir()
+            events = [
+                {"seq": 1, "event": "start", "ts": "2026-06-23T10:00:00Z"},
+                {"seq": 3, "event": "step", "ts": "2026-06-23T10:00:01Z",
+                 "tool": "calc", "model": "x"},
+                {"seq": 4, "event": "complete", "ts": "2026-06-23T10:00:02Z",
+                 "status": "success"},
+            ]
+            chained = _chain(events)
+            with (d / "events.jsonl").open("w") as fh:
+                for ev in chained:
+                    fh.write(json.dumps(ev) + "\n")
+            result = lint_run(d)
+            codes = [f.code for f in result.findings]
+            self.assertIn("E004", codes)
+
+    def test_lint_empty_events_e005(self):
+        """E005: events.jsonl exists but is empty."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-empty-events"
+            d.mkdir()
+            (d / "events.jsonl").write_text("", encoding="utf-8")
+            result = lint_run(d)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.errors, 1)
+            self.assertEqual(result.findings[0].code, "E005")
+
+    def test_lint_missing_start_event_w001(self):
+        """W001: no 'start' event."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-no-start"
+            events = [
+                {"seq": 1, "event": "step", "ts": "2026-06-23T10:00:01Z",
+                 "tool": "calc", "model": "x"},
+                {"seq": 2, "event": "complete", "ts": "2026-06-23T10:00:02Z",
+                 "status": "success"},
+            ]
+            _write_run(d, events)
+            result = lint_run(d)
+            codes = [f.code for f in result.findings]
+            self.assertIn("W001", codes)
+            self.assertTrue(result.ok)  # warnings don't fail
+
+    def test_lint_missing_complete_event_w002(self):
+        """W002: no 'complete' event."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-no-complete"
+            events = [
+                {"seq": 1, "event": "start", "ts": "2026-06-23T10:00:00Z"},
+                {"seq": 2, "event": "step", "ts": "2026-06-23T10:00:01Z",
+                 "tool": "calc", "model": "x"},
+            ]
+            _write_run(d, events)
+            result = lint_run(d)
+            codes = [f.code for f in result.findings]
+            self.assertIn("W002", codes)
+
+    def test_lint_non_monotonic_timestamp_w003(self):
+        """W003: timestamps go backward."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-back-ts"
+            events = [
+                {"seq": 1, "event": "start", "ts": "2026-06-23T10:00:10Z"},
+                {"seq": 2, "event": "step", "ts": "2026-06-23T10:00:05Z",
+                 "tool": "calc", "model": "x"},
+                {"seq": 3, "event": "complete", "ts": "2026-06-23T10:00:12Z",
+                 "status": "success"},
+            ]
+            _write_run(d, events)
+            result = lint_run(d)
+            codes = [f.code for f in result.findings]
+            self.assertIn("W003", codes)
+
+    def test_lint_trajectory_cross_ref_w004(self):
+        """W004: trajectory references tools not in events."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-traj-xref"
+            traj = [{
+                "id": "t1",
+                "trajectory": [{"step": 1, "tool": "nonexistent_tool"}],
+            }]
+            _write_run(d, GOOD_EVENTS, traj)
+            result = lint_run(d)
+            codes = [f.code for f in result.findings]
+            self.assertIn("W004", codes)
+
+    def test_lint_cost_without_model_w005(self):
+        """W005: cost_usd present but no model field."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-cost-no-model"
+            events = [
+                {"seq": 1, "event": "start", "ts": "2026-06-23T10:00:00Z"},
+                {"seq": 2, "event": "step", "ts": "2026-06-23T10:00:01Z",
+                 "tool": "calc", "cost_usd": 0.001},  # no model!
+                {"seq": 3, "event": "complete", "ts": "2026-06-23T10:00:02Z",
+                 "status": "success"},
+            ]
+            _write_run(d, events)
+            result = lint_run(d)
+            codes = [f.code for f in result.findings]
+            self.assertIn("W005", codes)
+
+    def test_lint_handoff_missing_verdict_w006(self):
+        """W006: handoff_ledger entry missing verdict."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-handoff-no-verdict"
+            _write_run(d, GOOD_EVENTS, GOOD_TRAJ,
+                       handoff_ledger=[{"something": "but no verdict"}])
+            result = lint_run(d)
+            codes = [f.code for f in result.findings]
+            self.assertIn("W006", codes)
+
+    def test_lint_fiscal_missing_decision_w007(self):
+        """W007: fiscal.jsonl entry missing decision."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-fiscal-no-decision"
+            _write_run(d, GOOD_EVENTS, GOOD_TRAJ,
+                       fiscal_log=[{"amount": 100}])  # no decision/verdict/status
+            result = lint_run(d)
+            codes = [f.code for f in result.findings]
+            self.assertIn("W007", codes)
+
+    def test_lint_to_dict_schema(self):
+        """LintReport.to_dict() has the documented JSON schema."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-schema"
+            _write_run(d, GOOD_EVENTS, GOOD_TRAJ)
+            result = lint_run(d)
+            payload = result.to_dict()
+            for key in ("run_id", "ok", "errors", "warnings", "findings"):
+                self.assertIn(key, payload)
+            self.assertIsInstance(payload["findings"], list)
+
+    def test_lint_cli_flag_exits_zero_on_clean_run(self):
+        """`--lint` CLI flag on a clean run exits 0 and emits valid JSON."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-cli-clean"
+            _write_run(d, GOOD_EVENTS, GOOD_TRAJ,
+                       handoff_ledger=[{"verdict": "accept"}],
+                       fiscal_log=[{"decision": "allow"}])
+            proc = _run_cli("--lint", "--run-dir", str(d))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertTrue(payload["lint"])
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["errors"], 0)
+
+    def test_lint_cli_flag_exits_two_on_error(self):
+        """`--lint` CLI flag exits 2 when errors are found."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "run-cli-bad"
+            d.mkdir()
+            chained = _chain(GOOD_EVENTS)
+            chained[1]["output"] = "tampered"
+            with (d / "events.jsonl").open("w") as fh:
+                for ev in chained:
+                    fh.write(json.dumps(ev) + "\n")
+            proc = _run_cli("--lint", "--run-dir", str(d))
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertGreaterEqual(payload["errors"], 1)
 
 
 if __name__ == "__main__":

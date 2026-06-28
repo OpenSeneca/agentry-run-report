@@ -31,6 +31,7 @@ sys.path.insert(0, str(HERE))
 from agentry_run_report import (  # noqa: E402
     ReportError,
     __version__,
+    lint_run,
     load_run,
     render_markdown,
     to_json,
@@ -82,6 +83,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
              "does NOT emit the report body.",
     )
     p.add_argument(
+        "--lint",
+        action="store_true",
+        help="Lint the run directory for structural and semantic integrity "
+             "instead of generating a report. Outputs a JSON findings list "
+             "with codes E001-E005 (errors) and W001-W007 (warnings). "
+             "Exit 0 if no errors, 2 if errors found.",
+    )
+    p.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -91,6 +100,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
+
+    # --lint short-circuits: validate run directory integrity.
+    if args.lint:
+        import json as _json
+        report = lint_run(args.run_dir)
+        payload = {
+            "tool": "agentry-run-report",
+            "version": __version__,
+            "lint": True,
+            **report.to_dict(),
+        }
+        sys.stdout.write(_json.dumps(payload, ensure_ascii=False) + "\n")
+        return 0 if report.ok else 2
 
     try:
         report = load_run(args.run_dir)

@@ -23,9 +23,12 @@ deliverable). Pairs with the rest of the Agentry stack:
 from .report import (
     RunReport,
     ReportError,
+    LintFinding,
+    LintReport,
     aggregate_steps,
     compute_costs,
     compute_durations,
+    lint_run,
     load_run,
     render_markdown,
     to_json,
@@ -35,13 +38,16 @@ from .report import (
 __all__ = [
     "RunReport",
     "ReportError",
+    "LintFinding",
+    "LintReport",
     "aggregate_steps",
     "compute_costs",
     "compute_durations",
+    "lint_run",
     "load_run",
     "render_markdown",
     "to_json",
     "verify_chain",
 ]
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

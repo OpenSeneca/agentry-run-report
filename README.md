@@ -10,7 +10,7 @@ the audit layer.
 
 | Agentry layer | Status | Tests | License | Python | Deps |
 |---|---|---|---|---|---|
-| orchestration (unified report / run-summary) | v0.1.2 | 17/17 in <0.5s | MIT (OpenSeneca) | 3.8+ | **stdlib only** |
+| orchestration (unified report / run-summary / lint) | v0.1.3 | 33/33 in <0.7s | MIT (OpenSeneca) | 3.8+ | **stdlib only** |
 
 ## What it composes into
 
@@ -78,15 +78,36 @@ agentry-run-report runs/run-001 --summary
 
 # Version
 agentry-run-report --version
+python3 agentry-run-report.py --run-dir runs/run-001 --format json --strict
+
+# Lint mode: validate run directory integrity (new in v0.1.3)
+python3 agentry-run-report.py --lint --run-dir runs/run-001
 ```
 
 Can also be invoked as `python3 -m agentry_run_report <run-dir>` or `python3 agentry-run-report.py <run-dir>`.
 
 Exit codes:
-- `0` — report built, run completed, chain intact
-- `2` — (with `--strict`) chain broken
+- `0` — report built / lint clean (no errors)
+- `2` — (with `--strict`) chain broken / (with `--lint`) errors found
 - `3` — (with `--strict`) run did not reach a `complete` / `success` status
 - `1` — bad arguments / unreadable run dir
+
+### `--lint` codes (v0.1.3+)
+
+| Code | Severity | Message |
+|------|----------|---------|
+| E001 | error | `events.jsonl` not found |
+| E002 | error | `events.jsonl` has invalid JSON lines |
+| E003 | error | SHA-256 chain break detected |
+| E004 | error | `seq` numbers are not contiguous |
+| E005 | error | `events.jsonl` is empty |
+| W001 | warning | no `start` event |
+| W002 | warning | no `complete` event |
+| W003 | warning | timestamps go backward |
+| W004 | warning | trajectory references tools not in events |
+| W005 | warning | `cost_usd` present but no `model` field |
+| W006 | warning | `handoff_ledger` entry missing verdict |
+| W007 | warning | `fiscal.jsonl` entry missing decision |
 
 ## Python API
 
@@ -97,6 +118,19 @@ report = load_run("runs/run-001")
 print(render_markdown(report))
 with open("report.json", "w") as f:
     f.write(to_json(report))
+```
+
+### Lint API (v0.1.3+)
+
+```python
+from agentry_run_report import lint_run
+
+result = lint_run("runs/run-001")
+print(result.ok)         # True if no errors
+print(result.errors)     # count of E* findings
+print(result.warnings)   # count of W* findings
+for f in result.findings:
+    print(f.code, f.severity, f.message)
 ```
 
 ## Run directory layout (consumed)
@@ -127,10 +161,12 @@ It composes their outputs. One job, well-bounded.
 
 ```bash
 cd agentry-run-report
-python3 tests/test_report.py
+python3 -m pytest tests/ -q   # or: python3 tests/test_report.py
+bash examples/smoke.sh
 ```
 
 17 tests, ~0.5s, stdlib only. 18/18 smoke checks via `bash examples/smoke.sh`.
+33 unit tests (~0.7s) + 10-section smoke (22 checks), stdlib only.
 
 ## Example
 

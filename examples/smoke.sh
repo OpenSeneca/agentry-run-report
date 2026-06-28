@@ -15,6 +15,10 @@
 #                              (closes the v0.1.5 defect pattern from
 #                              agentry-stack-smoke, where the flag shipped
 #                              but the string was stuck at the prior version)
+#   9. --lint (clean)        : lint flag on well-formed run exits 0 with valid JSON
+#                              (new in v0.1.3)
+#  10. --lint (chain break)  : lint flag on tampered run exits 2 with E003 finding
+#                              (new in v0.1.3)
 #
 # Usage:  ./examples/smoke.sh
 # Exit:   0 on success, 1 on first failure.
@@ -218,9 +222,44 @@ print(f"  CLI={m_cli.group(1)} pyproject={m_toml.group(1)} __version__={agentry_
 PY
 expect_exit "regression pin shape" 0 $?
 
+# ------------------------------------------------------------------
+# 9. --lint on a clean run exits 0 and emits valid JSON (new in v0.1.3).
+# ------------------------------------------------------------------
+step "--lint on clean run exits 0 with valid JSON (new in v0.1.3)"
+python3 agentry-run-report.py --lint --run-dir "$RUN" > "$OUT/lint-clean.json" 2>&1
+expect_exit "lint clean exit" 0 $?
+python3 - <<PY
+import json
+payload = json.load(open("$OUT/lint-clean.json"))
+assert payload["tool"] == "agentry-run-report", payload["tool"]
+assert payload["lint"] is True, payload
+assert payload["ok"] is True, payload
+assert payload["errors"] == 0, payload
+print(f"  lint clean: ok={payload['ok']} errors={payload['errors']} warnings={payload['warnings']}")
+PY
+expect_exit "lint clean shape" 0 $?
+
+# ------------------------------------------------------------------
+# 10. --lint on a chain-broken run exits 2 with E003 (new in v0.1.3).
+# ------------------------------------------------------------------
+step "--lint on chain-broken run exits 2 with E003 (new in v0.1.3)"
+python3 agentry-run-report.py --lint --run-dir "$TAMPER" > "$OUT/lint-bad.json" 2>&1
+expect_exit "lint chain-break exit" 2 $?
+python3 - <<PY
+import json
+payload = json.load(open("$OUT/lint-bad.json"))
+assert payload["lint"] is True, payload
+assert payload["ok"] is False, payload
+assert payload["errors"] >= 1, payload
+codes = [f["code"] for f in payload["findings"]]
+assert "E003" in codes, f"E003 not in {codes}"
+print(f"  lint bad: ok={payload['ok']} errors={payload['errors']} codes={codes}")
+PY
+expect_exit "lint chain-break shape" 0 $?
+
 echo
 if [ "$FAIL" -eq 0 ]; then
-    echo "ALL GREEN -- 8/8 sections, 18/18 checks"
+    echo "ALL GREEN -- 10/10 sections, 22/22 checks"
     exit 0
 else
     echo "SMOKE FAILED"

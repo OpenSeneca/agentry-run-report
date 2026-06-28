@@ -29,6 +29,47 @@ from typing import Any, Iterable, Mapping, Sequence
 # ---------- public errors ----------
 
 
+# ---------- lint data classes ----------
+
+
+@dataclass
+class LintFinding:
+    """A single lint finding for run-directory integrity."""
+
+    code: str
+    severity: str  # "error" | "warning"
+    message: str
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LintReport:
+    """Result of linting a run directory."""
+
+    run_id: str
+    findings: list[LintFinding]
+    errors: int
+    warnings: int
+    ok: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "ok": self.ok,
+            "errors": self.errors,
+            "warnings": self.warnings,
+            "findings": [
+                {
+                    "code": f.code,
+                    "severity": f.severity,
+                    "message": f.message,
+                    "detail": f.detail,
+                }
+                for f in self.findings
+            ],
+        }
+
+
 class ReportError(ValueError):
     """Raised when a run directory is missing required files or is malformed."""
 
@@ -460,6 +501,218 @@ def render_markdown(report: RunReport) -> str:
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------- lint ----------
+
+
+def lint_run(run_dir: str | Path) -> LintReport:
+    """Lint a run directory for structural and semantic integrity.
+
+    Checks performed (all stdlib, no side effects):
+
+    - **E001** missing events.jsonl (error)
+    - **E002** events.jsonl has invalid JSON lines (error)
+    - **E003** chain break detected (error)
+    - **E004** sequence gap — seq numbers are not contiguous (error)
+    - **E005** no events at all (error)
+    - **W001** no 'start' event (warning)
+    - **W002** no 'complete' event (warning)
+    - **W003** timestamp non-monotonic (warning)
+    - **W004** trajectories.jsonl has trajectory whose tool calls
+      don't appear in events (warning)
+    - **W005** cost_usd present but no model field (warning)
+    - **W006** handoff_ledger entry missing verdict (warning)
+    - **W007** fiscal.jsonl entry missing decision (warning)
+
+    Returns a ``LintReport``. Does **not** raise on lint failures —
+    only on unreadable directories (use ``load_run`` for that).
+    """
+    p = Path(run_dir)
+    findings: list[LintFinding] = []
+
+    events_path = p / "events.jsonl"
+    traj_path = p / "trajectories.jsonl"
+    handoff_path = p / "handoff_ledger.jsonl"
+    fiscal_path = p / "fiscal.jsonl"
+
+    # --- events.jsonl ---
+    if not events_path.is_file():
+        findings.append(LintFinding(
+            code="E001", severity="error",
+            message="events.jsonl not found",
+            detail={"path": str(events_path)},
+        ))
+        return LintReport(
+            run_id=p.name, findings=findings,
+            errors=1, warnings=0, ok=False,
+        )
+
+    # Parse events (reuse _read_jsonl but catch errors as findings)
+    try:
+        events = _read_jsonl(events_path)
+    except ReportError as e:
+        findings.append(LintFinding(
+            code="E002", severity="error",
+            message=str(e),
+            detail={"path": str(events_path)},
+        ))
+        return LintReport(
+            run_id=p.name, findings=findings,
+            errors=1, warnings=0, ok=False,
+        )
+
+    if not events:
+        findings.append(LintFinding(
+            code="E005", severity="error",
+            message="events.jsonl is empty",
+        ))
+        return LintReport(
+            run_id=p.name, findings=findings,
+            errors=1, warnings=0, ok=False,
+        )
+
+    # Chain check
+    chain_status = verify_chain(events)
+    if not chain_status.ok:
+        findings.append(LintFinding(
+            code="E003", severity="error",
+            message=f"SHA-256 chain broken at seq {chain_status.broken_at_seq}",
+            detail={
+                "broken_at_seq": chain_status.broken_at_seq,
+                "expected_hash": chain_status.expected_hash,
+                "actual_hash": chain_status.actual_hash,
+            },
+        ))
+
+    # Sequence continuity
+    seqs = [ev.get("seq") for ev in events if "seq" in ev]
+    if seqs:
+        expected = list(range(seqs[0], seqs[0] + len(seqs)))
+        if seqs != expected:
+            findings.append(LintFinding(
+                code="E004", severity="error",
+                message="seq numbers are not contiguous from start",
+                detail={"seqs": seqs},
+            ))
+
+    # Start / complete events
+    has_start = any(ev.get("event") == "start" for ev in events)
+    has_complete = any(ev.get("event") == "complete" for ev in events)
+    if not has_start:
+        findings.append(LintFinding(
+            code="W001", severity="warning",
+            message="no 'start' event in events.jsonl",
+        ))
+    if not has_complete:
+        findings.append(LintFinding(
+            code="W002", severity="warning",
+            message="no 'complete' event in events.jsonl",
+        ))
+
+    # Timestamp monotonicity
+    prev_ts: datetime | None = None
+    mono_breaks: list[dict[str, Any]] = []
+    for ev in events:
+        ts_str = ev.get("ts") or ev.get("timestamp")
+        if not isinstance(ts_str, str):
+            continue
+        try:
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if prev_ts is not None and dt < prev_ts:
+            mono_breaks.append({
+                "seq": ev.get("seq"),
+                "ts": ts_str,
+                "prev_ts": prev_ts.isoformat(),
+            })
+        prev_ts = dt
+    if mono_breaks:
+        findings.append(LintFinding(
+            code="W003", severity="warning",
+            message=f"{len(mono_breaks)} timestamp(s) go backward",
+            detail={"breaks": mono_breaks},
+        ))
+
+    # Trajectory cross-reference
+    if traj_path.is_file():
+        event_tools = {
+            ev.get("tool") for ev in events
+            if ev.get("event") == "step" and ev.get("tool")
+        }
+        try:
+            trajectories = _read_jsonl(traj_path)
+            for traj in trajectories:
+                traj_tools = {
+                    step.get("tool")
+                    for step in traj.get("trajectory", [])
+                    if step.get("tool")
+                }
+                missing = traj_tools - event_tools
+                if missing:
+                    findings.append(LintFinding(
+                        code="W004", severity="warning",
+                        message=f"trajectory {traj.get('id', '?')} references tools not in events",
+                        detail={
+                            "trajectory_id": traj.get("id"),
+                            "missing_tools": sorted(missing),
+                        },
+                    ))
+        except ReportError:
+            pass  # malformed trajectories.jsonl — skip cross-ref
+
+    # cost_usd without model
+    for ev in events:
+        if ev.get("cost_usd") is not None and not ev.get("model"):
+            findings.append(LintFinding(
+                code="W005", severity="warning",
+                message="step event has cost_usd but no model field",
+                detail={"seq": ev.get("seq")},
+            ))
+            break  # one finding is enough; don't spam
+
+    # handoff ledger
+    if handoff_path.is_file():
+        try:
+            ledger = _read_jsonl(handoff_path)
+            for row in ledger:
+                if not row.get("verdict") and not row.get("result"):
+                    findings.append(LintFinding(
+                        code="W006", severity="warning",
+                        message="handoff_ledger entry missing verdict/result",
+                        detail={"entry": row},
+                    ))
+                    break  # one is enough
+        except ReportError:
+            pass
+
+    # fiscal log
+    if fiscal_path.is_file():
+        try:
+            fiscal = _read_jsonl(fiscal_path)
+            for row in fiscal:
+                if not row.get("decision") and not row.get("verdict") and not row.get("status"):
+                    findings.append(LintFinding(
+                        code="W007", severity="warning",
+                        message="fiscal.jsonl entry missing decision/verdict/status",
+                        detail={"entry": row},
+                    ))
+                    break  # one is enough
+        except ReportError:
+            pass
+
+    errors = sum(1 for f in findings if f.severity == "error")
+    warnings = sum(1 for f in findings if f.severity == "warning")
+    return LintReport(
+        run_id=p.name,
+        findings=findings,
+        errors=errors,
+        warnings=warnings,
+        ok=errors == 0,
+    )
 
 
 # ---------- stat helpers exposed for tests ----------
